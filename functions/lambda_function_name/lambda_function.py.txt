@@ -1,0 +1,123 @@
+import json,boto3, os, zipfile, logging, io, time
+import boto3
+import base64
+from botocore.exceptions import ClientError
+   
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def lambda_handler(event,context): 
+    
+    secret_client = boto3.client('secretsmanager', 'us-west-2')
+    secret = get_secret(secret_client,'secret_name')
+    secret = json.loads(secret)
+    
+    cloudformation_client = boto3.client('cloudformation')
+    lambda_client = boto3.client('lambda')
+    s3_client = boto3.client('s3')
+   
+    codecommit_client = boto3.client(service_name = 'codecommit',aws_access_key_id=secret['account_key'],aws_secret_access_key = secret['account_secret'])
+    
+    function_list = event['functions']
+    print(event['functions'])
+    print(event['functions'][0])
+    
+    #name the bucket
+    bucket = event['bucket_name']
+    repo_name = event['repo_name']
+    branch_name = event['branch_name']
+
+
+    for i in range(len(function_list)):
+        #get the function and stack names from the event trigger
+        function_name = event['functions'][i]['function_name']
+        stack_name = event['functions'][i]['stack_name']
+        
+        
+        folder = codecommit_client.get_folder(repositoryName=repo_name, commitSpecifier=branch_name,folderPath=r'functions/'+function_name)
+        
+        zip_file_name = 'lambda_function.zip'
+        temp_dir = r'/tmp/'
+        
+        #lambda wants a zip so I need to give it a zip (for simplicity this is going to )
+        with zipfile.ZipFile(r'/tmp/lambda_function.zip', 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for file in folder['files']:
+                # Download the file and add it to the ZIP archive
+                file_name = os.path.join(temp_dir, file['relativePath'])
+                response = codecommit_client.get_file(repositoryName=repo_name,commitSpecifier=branch_name,filePath=file['absolutePath'])
+                with open(file_name, 'wb') as f:
+                    f.write(response['fileContent'])
+                zipf.write(file_name, os.path.relpath(file_name, temp_dir))
+
+
+        #put the zip in s3
+        response = s3_client.put_object(Body=open(r'/tmp/lambda_function.zip', 'rb'),Bucket=bucket,Key=r'lambda_resources/'+function_name+r'/lambda_function.zip')
+        #put the function buildspec into s3
+        response = s3_client.put_object(Body=open(r'/tmp/'+function_name+'.yaml','rb'),Bucket=bucket,Key=r'lambda_resources/'+function_name+r'/'+function_name+'.yaml')
+        
+        #template url for pasing into cloudformation
+        template_url = r'https://'+bucket+r'.s3.us-west-2.amazonaws.com/lambda_resources/'+function_name+r'/' + function_name + '.yaml'
+        print(template_url)
+
+        #lambda arn's are going to be different in prod and nonprod, so we need this to change the account number
+        if branch_name == "prod":
+            lambda_arn = 'arn:aws:lambda:us-west-2:'+prod_account_number+':function:' + function_name
+        elif branch_name == "nonprod":
+            lambda_arn = 'arn:aws:lambda:us-west-2:'+nonprod_account_number+':function:' + function_name
+        
+        
+        response = lambda_client.update_function_code(FunctionName = lambda_arn,S3Bucket=bucket,S3Key = r'lambda_resources/'+function_name+r'/lambda_function.zip')
+        #the lambda function needs time to finish updating where the code is before you can change other stuff
+        time.sleep(15)
+        
+        #if the function has any lambda layers listed in the function_list.json, it will add them to the function
+        if len(event['functions'][i]['lambda_layers']) > 0:
+            response = lambda_client.update_function_configuration(FunctionName = lambda_arn,Layers=event['functions'][i]['lambda_layers'])
+        
+        #didn't actually need this maybe, but thought it would be safer to wait for lambda to update before running the cloudformation jazz
+        time.sleep(15)
+        
+        response = cloudformation_client.update_stack(StackName=stack_name,TemplateURL=template_url,Capabilities=['CAPABILITY_IAM','CAPABILITY_AUTO_EXPAND'],Parameters = [{'ParameterKey':'RoleParam','ParameterValue':event['functions'][i]['role_arn']}])
+
+def get_secret(client, secret_name):
+    # In this sample we only handle the specific exceptions for the 'GetSecretValue' API.
+    # See https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_GetSecretValue.html
+    # We rethrow the exception by default.
+
+    try:
+        get_secret_value_response = client.get_secret_value(
+            SecretId=secret_name
+        )
+        # logger.info('secret value ' + str(get_secret_value_response))
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'DecryptionFailureException':
+            # Secrets Manager can't decrypt the protected secret text using the provided KMS key.
+            # Deal with the exception here, and/or rethrow at your discretion.
+            raise e
+        elif e.response['Error']['Code'] == 'InternalServiceErrorException':
+            # An error occurred on the server side.
+            # Deal with the exception here, and/or rethrow at your discretion.
+            raise e
+        elif e.response['Error']['Code'] == 'InvalidParameterException':
+            # You provided an invalid value for a parameter.
+            # Deal with the exception here, and/or rethrow at your discretion.
+            raise e
+        elif e.response['Error']['Code'] == 'InvalidRequestException':
+            # You provided a parameter value that is not valid for the current state of the resource.
+            # Deal with the exception here, and/or rethrow at your discretion.
+            raise e
+        elif e.response['Error']['Code'] == 'ResourceNotFoundException':
+            # We can't find the resource that you asked for.
+            # Deal with the exception here, and/or rethrow at your discretion.
+            raise e
+        else:
+            raise e
+    else:
+        # Decrypts secret using the associated KMS CMK.
+        # Depending on whether the secret is a string or binary, one of these fields will be populated.
+        if 'SecretString' in get_secret_value_response:
+            secret = get_secret_value_response['SecretString']
+            return secret
+        else:
+            decoded_binary_secret = base64.b64decode(get_secret_value_response['SecretBinary'])
+            return decoded_bindary_secret
