@@ -1,0 +1,7 @@
+version: 0.2
+env:
+  git-credential-helper: yes
+phases:   
+  build:
+    commands:
+        - aws lambda invoke --function-name arn:aws:lambda:region:nonprod_account_number:function:lambda_function_name --invocation-type Event --payload file://nonprod_function_list.json outfile.txt

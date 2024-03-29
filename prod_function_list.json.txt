@@ -1,0 +1,13 @@
+{
+    "functions":[
+        {
+            "function_name":"lambda_function_name",
+            "stack_name":"lambda_function_stack_name",
+            "role_arn":"role_arn",
+            "lambda_layers":[]
+        }
+    ],
+    "branch_name":"prod",
+    "bucket_name":"",
+    "repo_name":""
+}
