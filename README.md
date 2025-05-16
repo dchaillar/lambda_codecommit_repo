@@ -1,0 +1,1 @@
+This is meant as a template for updating lambda functions using a codecommit code repository.  This can also be done with github actions if you are lucky enough to use github as your enterprise ci/cd tool!
